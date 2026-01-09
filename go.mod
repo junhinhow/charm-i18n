@@ -1,0 +1,1 @@
+﻿module github.com/junhinhow/charm-i18n  go 1.23.0
