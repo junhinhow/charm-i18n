@@ -97,13 +97,28 @@ func (c *Catalog) T(key string) string {
 }
 
 // Tf traduz uma chave e formata o resultado usando fmt.Sprintf.
-// Os argumentos sao aplicados ao template traduzido.
+//
+// Quando a chave nao existe no catalogo, a PROPRIA CHAVE e devolvida sem
+// aplicar a formatacao (evitando artefatos como
+// "missing.key%!(EXTRA string=Gopher)").
+//
+// Quando o template traduzido nao pode ser formatado com os argumentos
+// informados (faltam argumentos, o "%" literal nao foi escapado, etc.), o
+// template original e devolvido sem modificacoes. Em nenhum dos casos a
+// saida contem os artefatos de erro do fmt ("%!d(MISSING)", "%!(EXTRA ...)").
 func (c *Catalog) Tf(key string, args ...any) string {
-	template := c.T(key)
-	if len(args) == 0 {
+	template, ok := c.lookup(key)
+	if !ok {
+		// Chave inexistente: devolve a chave, sem formatar.
+		return key
+	}
+
+	formatted, ok := formatTemplate(template, args)
+	if !ok {
+		// Template invalido ou argumentos faltando: devolve o template cru.
 		return template
 	}
-	return fmt.Sprintf(template, args...)
+	return formatted
 }
 
 // DetectLocale detecta o locale do sistema a partir das variaveis de ambiente.
@@ -167,6 +182,27 @@ func (c *Catalog) Has(key string) bool {
 		return exists
 	}
 	return false
+}
+
+// lookup procura a chave no locale ativo e no locale de fallback.
+// Devolve o valor e true quando a chave existe.
+func (c *Catalog) lookup(key string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if msgs, ok := c.translations[c.locale]; ok {
+		if val, ok := msgs[key]; ok {
+			return val, true
+		}
+	}
+	if c.locale != c.fallback {
+		if msgs, ok := c.translations[c.fallback]; ok {
+			if val, ok := msgs[key]; ok {
+				return val, true
+			}
+		}
+	}
+	return "", false
 }
 
 // localeKey normaliza um locale para uso como chave de armazenamento.
