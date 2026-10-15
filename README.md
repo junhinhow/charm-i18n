@@ -2,15 +2,17 @@
 
 Internationalization for terminal UIs — message catalogs, locale detection, RTL support.
 
-> [Leia em Portugues](README.pt-br.md)
+> [Leia em Português](README.pt-br.md)
 
 ## Features
 
 - **Message catalogs** with locale -> key -> value mapping
 - **Locale detection** from `LC_ALL`, `LC_MESSAGES`, `LANG` environment variables
-- **Formatted translations** with `fmt.Sprintf`-style arguments
+- **Locale normalization** (`PT_br.UTF-8` → `pt-BR`, `C.UTF-8` → `en`)
+- **Fallback chain** (`pt-BR` → `pt` → fallback locale)
+- **Formatted translations** with `fmt.Sprintf`-style arguments (never emits `%!(EXTRA ...)` artifacts)
 - **JSON loading** for translation files
-- **Fallback locale** when a key is missing in the active locale
+- **RTL support**: script detection and visual reordering of bidirectional text
 - **Thread-safe** catalog operations
 - Zero external dependencies (stdlib only)
 
@@ -70,21 +72,112 @@ if err := cat.LoadJSON("translations.json"); err != nil {
 }
 ```
 
+## Locale resolution
+
+`DetectLocale` reads `LC_ALL`, `LC_MESSAGES` and `LANG` (in that order) and returns a
+normalized locale:
+
+| Environment value | Result |
+|---|---|
+| `pt_BR.UTF-8` | `pt-BR` |
+| `PT_br.UTF-8` | `pt-BR` |
+| `de_DE.UTF-8@euro` | `de-DE` |
+| `C`, `c`, `POSIX`, `posix` | `en` |
+| `C.UTF-8`, `POSIX.UTF-8` | `en` |
+
+The POSIX pseudo-locales are resolved to `en` because `C.UTF-8` is the default of many
+modern Linux distributions (systemd/Debian) and does not describe a real language.
+
+### Fallback chain
+
+A lookup walks the locale chain until the key is found:
+
+```
+active locale  ->  base language  ->  fallback locale  ->  fallback base language
+   pt-BR       ->       pt         ->        en        ->            en
+```
+
+```go
+cat.SetLocale("pt-BR")
+cat.SetFallback("en")
+
+cat.AddLocale("en",  map[string]string{"only.en": "Only EN"})
+cat.AddLocale("pt",  map[string]string{"only.pt": "Only PT"})
+cat.AddLocale("pt-BR", map[string]string{"only.br": "Only BR"})
+
+cat.T("only.br") // "Only BR"  (exact locale)
+cat.T("only.pt") // "Only PT"  (base language)
+cat.T("only.en") // "Only EN"  (fallback)
+```
+
+`Has` follows exactly the same chain as `T`, so the two never disagree.
+
+## Formatted translations
+
+`Tf` never leaks the error artifacts of `fmt.Sprintf`:
+
+| Call | Result |
+|---|---|
+| `Tf("greeting", "Alice", 5)` with `"Hello, %s! You have %d messages."` | `Hello, Alice! You have 5 messages.` |
+| `Tf("missing.key", "Gopher")` | `missing.key` (the key itself, unformatted) |
+| `Tf("greeting", "Alice")` with two verbs | the original template (no `%!d(MISSING)`) |
+| `Tf("discount", "Gopher")` with `"50% off"` | `50% off` (a bare `%` is kept literal) |
+| `Tf("discount", "Gopher")` with `"50%% off"` | `50% off` |
+
+Rules:
+
+- A missing key returns the key itself, without any formatting.
+- A template that cannot be formatted with the given arguments (missing arguments,
+  incompatible types) is returned unchanged — nothing is formatted half-way.
+- Extra arguments are ignored.
+- `%%` produces a literal `%`; a `%` that does not start a valid directive stays literal.
+
+## Right-to-left (RTL) support
+
+The package ships real RTL support, not just a promise:
+
+```go
+i18n.IsRTL("ar-EG")   // true
+i18n.IsRTL("he")      // true
+i18n.IsRTL("az-Arab") // true  (script subtag wins over the language)
+i18n.IsRTL("pt-BR")   // false
+
+// Visual order of bidirectional text (for terminals without bidi support)
+i18n.Reverse("Hello שלום") // "Hello םולש"
+i18n.Reverse("שלום")        // "םולש"
+```
+
+**Scope (honest description):**
+
+- `IsRTL` decides the direction from the locale language subtag (Arabic, Hebrew, Persian,
+  Urdu, ...) or, when present, from the script subtag (ISO 15924).
+- `Reverse` reorders a string into **visual order** (left to right) using a subset of the
+  Unicode Bidirectional Algorithm (UAX #9): grapheme cluster segmentation, resolution of
+  neutrals and numbers (rules W1–W7, N1–N2), implicit levels (I1–I2) and reordering
+  (L1–L2).
+- **Not implemented**: explicit embedding controls (`LRE`/`RLE`/`LRO`/`RLO`), isolate
+  controls, and the full Unicode character database for bidi classes (the classification
+  covers Latin, Greek, Cyrillic, Arabic, Hebrew and the other common RTL scripts).
+- In pure LTR text the visual order equals the logical order, so `Reverse` returns the
+  input unchanged.
+
 ## API
 
 | Function / Method | Description |
 |-------------------|-------------|
 | `NewCatalog() *Catalog` | Create a new empty catalog (default locale: `"en"`) |
-| `AddLocale(locale, messages)` | Add translations for a locale |
-| `SetLocale(locale)` | Set the active locale |
-| `SetFallback(locale)` | Set the fallback locale |
+| `AddLocale(locale, messages)` | Add translations for a locale (the key is normalized) |
+| `SetLocale(locale)` | Set the active locale (normalized) |
+| `SetFallback(locale)` | Set the fallback locale (normalized) |
 | `Locale() string` | Get the current active locale |
-| `T(key) string` | Translate a key |
-| `Tf(key, args...) string` | Translate with `fmt.Sprintf` formatting |
+| `T(key) string` | Translate a key, walking the fallback chain |
+| `Tf(key, args...) string` | Translate with `fmt.Sprintf` formatting (no error artifacts) |
+| `Has(key) bool` | Check if a key resolves through the fallback chain |
 | `DetectLocale() string` | Detect locale from env vars |
 | `LoadJSON(path) error` | Load translations from a JSON file |
-| `Locales() []string` | List available locales |
-| `Has(key) bool` | Check if a key exists in the active locale |
+| `Locales() []string` | List available locales (sorted alphabetically) |
+| `IsRTL(locale) bool` | Check whether a locale is right-to-left |
+| `Reverse(s) string` | Reorder a string into visual order (bidirectional text) |
 
 ## License
 
