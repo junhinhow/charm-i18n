@@ -29,3 +29,40 @@ func ExampleCatalog_Tf() {
 	fmt.Println(cat.Tf("greeting", "Gopher"))
 	// Output: Hello, Gopher!
 }
+
+func ExampleCatalog_Tf_missingKey() {
+	cat := i18n.NewCatalog()
+	cat.AddLocale("en", map[string]string{
+		"greeting": "Hello, %s!",
+	})
+
+	// Uma chave inexistente e devolvida sem aplicar a formatacao.
+	fmt.Println(cat.Tf("missing.key", "Gopher"))
+	// Output: missing.key
+}
+
+func ExampleCatalog_Has() {
+	cat := i18n.NewCatalog()
+	cat.AddLocale("en", map[string]string{
+		"hello": "Hello",
+	})
+	cat.SetLocale("pt-BR")
+
+	// Has percorre a mesma cadeia de fallback do T.
+	fmt.Println(cat.Has("hello"))
+	// Output: true
+}
+
+func ExampleIsRTL() {
+	fmt.Println(i18n.IsRTL("ar-EG"))
+	fmt.Println(i18n.IsRTL("pt-BR"))
+	// Output:
+	// true
+	// false
+}
+
+func ExampleReverse() {
+	// A ordem visual de um texto da direita para a esquerda.
+	fmt.Println(i18n.Reverse("שלום"))
+	// Output: םולש
+}

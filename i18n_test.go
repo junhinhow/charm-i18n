@@ -3,6 +3,8 @@ package i18n
 import (
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"testing"
 )
 
@@ -50,6 +52,54 @@ func TestFallback(t *testing.T) {
 	}
 }
 
+func TestCadeiaDeFallback(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"only.en": "Only EN",
+		"shared":  "Shared EN",
+	})
+	c.AddLocale("pt", map[string]string{
+		"only.pt": "Only PT",
+		"shared":  "Shared PT",
+	})
+	c.AddLocale("pt-BR", map[string]string{
+		"only.br": "Only BR",
+		"shared":  "Shared BR",
+	})
+	c.SetLocale("pt-BR")
+
+	// 1) locale exato
+	if got := c.T("only.br"); got != "Only BR" {
+		t.Errorf("esperava 'Only BR', obteve '%s'", got)
+	}
+	// 2) idioma base ("pt-BR" -> "pt")
+	if got := c.T("only.pt"); got != "Only PT" {
+		t.Errorf("esperava 'Only PT', obteve '%s'", got)
+	}
+	// 3) fallback padrao ("en")
+	if got := c.T("only.en"); got != "Only EN" {
+		t.Errorf("esperava 'Only EN', obteve '%s'", got)
+	}
+	// O locale exato tem prioridade sobre o idioma base.
+	if got := c.T("shared"); got != "Shared BR" {
+		t.Errorf("esperava 'Shared BR', obteve '%s'", got)
+	}
+}
+
+func TestNormalizacaoDeCaixa(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("pt-BR", map[string]string{"hello": "Ola"})
+	// O locale ativo e normalizado, entao "PT_br" encontra "pt-BR".
+	c.SetLocale("PT_br")
+
+	if got := c.T("hello"); got != "Ola" {
+		t.Errorf("esperava 'Ola', obteve '%s'", got)
+	}
+	if got := c.Locale(); got != "pt-BR" {
+		t.Errorf("esperava locale 'pt-BR', obteve '%s'", got)
+	}
+}
+
 func TestTfFormatacao(t *testing.T) {
 	c := NewCatalog()
 	c.AddLocale("en", map[string]string{
@@ -74,13 +124,110 @@ func TestTfSemArgumentos(t *testing.T) {
 	}
 }
 
-func TestDetectLocaleComLANG(t *testing.T) {
-	// Limpa variaveis que podem interferir
-	os.Unsetenv("LC_ALL")
-	os.Unsetenv("LC_MESSAGES")
+func TestTfChaveAusenteNaoFormata(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{"hello": "Hello"})
 
-	os.Setenv("LANG", "pt_BR.UTF-8")
-	defer os.Unsetenv("LANG")
+	// Antes da correcao a saida era "missing.key%!(EXTRA string=Gopher)".
+	got := c.Tf("missing.key", "Gopher")
+	if got != "missing.key" {
+		t.Errorf("esperava 'missing.key', obteve '%s'", got)
+	}
+}
+
+func TestTfVerboSemArgumento(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"greeting": "Hello, %s! You have %d messages.",
+	})
+
+	// Antes da correcao a saida era "Hello, Alice! You have %d%!(EXTRA...)"
+	// ou "Hello, Alice! You have %!d(MISSING)".
+	got := c.Tf("greeting", "Alice")
+	if got != "Hello, %s! You have %d messages." {
+		t.Errorf("esperava o template original, obteve '%s'", got)
+	}
+}
+
+func TestTfArgumentosExtras(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"greeting": "Hello, %s!",
+	})
+
+	// Argumentos extras nao podem gerar "%!(EXTRA ...)".
+	got := c.Tf("greeting", "Alice", 42)
+	if got != "Hello, Alice!" {
+		t.Errorf("esperava 'Hello, Alice!', obteve '%s'", got)
+	}
+}
+
+func TestTfPercentualLiteral(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"discount": "50% off",
+	})
+
+	// Um "%" literal nao escapado nao pode virar "50%!o(MISSING)ff".
+	got := c.Tf("discount", "Gopher")
+	if got != "50% off" {
+		t.Errorf("esperava '50%% off', obteve '%s'", got)
+	}
+}
+
+func TestTfPercentualEscapado(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"discount": "50%% off",
+	})
+
+	got := c.Tf("discount")
+	if got != "50% off" {
+		t.Errorf("esperava '50%% off', obteve '%s'", got)
+	}
+}
+
+func TestTfNuncaEmiteArtefatosDoFmt(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{
+		"a": "%s e %d",
+		"b": "50% off",
+		"c": "%z",
+	})
+
+	casos := []struct {
+		key  string
+		args []any
+	}{
+		{"a", []any{"x"}},
+		{"a", []any{1, 2}},
+		{"b", []any{"x"}},
+		{"c", []any{"x"}},
+		{"inexistente", []any{"x"}},
+	}
+
+	for _, tc := range casos {
+		got := c.Tf(tc.key, tc.args...)
+		if containsArtifact(got) {
+			t.Errorf("Tf(%q, %v) devolveu artefato do fmt: %q", tc.key, tc.args, got)
+		}
+	}
+}
+
+// containsArtifact informa se a string contem um artefato de erro do fmt.
+func containsArtifact(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '%' && s[i+1] == '!' {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDetectLocaleComLANG(t *testing.T) {
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "pt_BR.UTF-8")
 
 	got := DetectLocale()
 	if got != "pt-BR" {
@@ -89,8 +236,9 @@ func TestDetectLocaleComLANG(t *testing.T) {
 }
 
 func TestDetectLocaleComLCALL(t *testing.T) {
-	os.Setenv("LC_ALL", "fr_FR.UTF-8")
-	defer os.Unsetenv("LC_ALL")
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "")
 
 	got := DetectLocale()
 	if got != "fr-FR" {
@@ -99,13 +247,48 @@ func TestDetectLocaleComLCALL(t *testing.T) {
 }
 
 func TestDetectLocaleSemVariaveis(t *testing.T) {
-	os.Unsetenv("LC_ALL")
-	os.Unsetenv("LC_MESSAGES")
-	os.Unsetenv("LANG")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "")
 
 	got := DetectLocale()
 	if got != "en" {
 		t.Errorf("esperava 'en', obteve '%s'", got)
+	}
+}
+
+func TestDetectLocaleComPseudoLocalePOSIX(t *testing.T) {
+	casos := []string{
+		"C",
+		"c",
+		"C.UTF-8",
+		"c.UTF-8",
+		"POSIX",
+		"posix",
+		"POSIX.UTF-8",
+		"posix.UTF-8",
+	}
+
+	for _, valor := range casos {
+		t.Run(valor, func(t *testing.T) {
+			t.Setenv("LC_ALL", "")
+			t.Setenv("LC_MESSAGES", "")
+			t.Setenv("LANG", valor)
+
+			if got := DetectLocale(); got != "en" {
+				t.Errorf("LANG=%q: esperava 'en', obteve '%s'", valor, got)
+			}
+		})
+	}
+}
+
+func TestDetectLocaleNormalizaCaixa(t *testing.T) {
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "")
+	t.Setenv("LANG", "PT_br.UTF-8")
+
+	if got := DetectLocale(); got != "pt-BR" {
+		t.Errorf("esperava 'pt-BR', obteve '%s'", got)
 	}
 }
 
@@ -115,10 +298,18 @@ func TestParseLocale(t *testing.T) {
 		esperado string
 	}{
 		{"pt_BR.UTF-8", "pt-BR"},
+		{"PT_br.UTF-8", "pt-BR"},
 		{"en_US", "en-US"},
 		{"C", "en"},
+		{"c", "en"},
 		{"POSIX", "en"},
+		{"posix", "en"},
+		{"C.UTF-8", "en"},
+		{"c.UTF-8", "en"},
+		{"POSIX.UTF-8", "en"},
+		{"posix.UTF-8", "en"},
 		{"de_DE.UTF-8@euro", "de-DE"},
+		{"zh_Hant_TW", "zh-Hant-TW"},
 		{"", "en"},
 	}
 
@@ -193,6 +384,26 @@ func TestLocales(t *testing.T) {
 	}
 }
 
+func TestLocalesOrdenado(t *testing.T) {
+	c := NewCatalog()
+	for _, locale := range []string{"pt-BR", "en", "ar", "de", "fr"} {
+		c.AddLocale(locale, map[string]string{"a": "b"})
+	}
+
+	esperado := []string{"ar", "de", "en", "fr", "pt-BR"}
+	for i := 0; i < 20; i++ {
+		got := c.Locales()
+		if !sort.StringsAreSorted(got) {
+			t.Fatalf("Locales() nao esta ordenado: %v", got)
+		}
+		for j := range esperado {
+			if got[j] != esperado[j] {
+				t.Fatalf("Locales() esperado %v, obteve %v", esperado, got)
+			}
+		}
+	}
+}
+
 func TestHas(t *testing.T) {
 	c := NewCatalog()
 	c.AddLocale("en", map[string]string{"hello": "Hello"})
@@ -202,5 +413,74 @@ func TestHas(t *testing.T) {
 	}
 	if c.Has("missing") {
 		t.Error("esperava Has('missing') = false")
+	}
+}
+
+func TestHasRefleteFallback(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{"hello": "Hello"})
+	c.SetLocale("pt-BR")
+
+	// Antes da correcao Has devolvia false enquanto T devolvia "Hello".
+	if !c.Has("hello") {
+		t.Error("esperava Has('hello') = true (fallback)")
+	}
+	if got := c.T("hello"); got != "Hello" {
+		t.Errorf("esperava 'Hello', obteve '%s'", got)
+	}
+
+	if c.Has("inexistente") {
+		t.Error("esperava Has('inexistente') = false")
+	}
+}
+
+func TestHasIgualT(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{"a": "A", "b": "B"})
+	c.AddLocale("pt", map[string]string{"b": "B-pt"})
+	c.AddLocale("pt-BR", map[string]string{"c": "C-BR"})
+	c.SetLocale("pt-BR")
+
+	chaves := []string{"a", "b", "c", "d"}
+	for _, chave := range chaves {
+		existe := c.Has(chave)
+		valor := c.T(chave)
+		traduzida := valor != chave
+		if existe != traduzida {
+			t.Errorf("Has(%q)=%v mas T(%q)=%q", chave, existe, chave, valor)
+		}
+	}
+}
+
+func TestConcorrencia(t *testing.T) {
+	c := NewCatalog()
+	c.AddLocale("en", map[string]string{"hello": "Hello, %s!"})
+	c.SetLocale("en")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				switch j % 5 {
+				case 0:
+					c.T("hello")
+				case 1:
+					c.Tf("hello", "Gopher")
+				case 2:
+					c.Has("hello")
+				case 3:
+					c.Locales()
+				default:
+					c.AddLocale("pt-BR", map[string]string{"hello": "Ola, %s!"})
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got := c.T("hello"); got != "Hello, %s!" {
+		t.Errorf("esperava 'Hello, %%s!', obteve '%s'", got)
 	}
 }

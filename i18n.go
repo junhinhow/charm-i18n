@@ -1,13 +1,16 @@
 // Package i18n fornece internacionalizacao para interfaces de terminal.
 //
-// Suporta catalogos de mensagens, deteccao de locale, formatacao com argumentos
-// e carregamento de traducoes a partir de arquivos JSON.
+// Suporta catalogos de mensagens, deteccao de locale, cadeia de fallback
+// (ex: "pt-BR" -> "pt" -> "en"), formatacao com argumentos, carregamento de
+// traducoes a partir de arquivos JSON e suporte a direcao de escrita da
+// direita para a esquerda (RTL).
 package i18n
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -48,7 +51,9 @@ func (c *Catalog) AddLocale(locale string, messages map[string]string) {
 
 // SetLocale define o locale ativo para traducoes.
 //
-// O locale e normalizado (ex: "PT_br.UTF-8" -> "pt-BR").
+// O locale e normalizado (ex: "PT_br.UTF-8" -> "pt-BR") e a busca passa a
+// seguir a cadeia de fallback: locale ativo, idioma base do locale ativo,
+// locale de fallback e idioma base do fallback.
 func (c *Catalog) SetLocale(locale string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -70,30 +75,16 @@ func (c *Catalog) Locale() string {
 }
 
 // T traduz uma chave usando o locale ativo.
-// Se a chave nao for encontrada no locale ativo, tenta o fallback.
-// Se tambem nao encontrar no fallback, retorna a propria chave.
+//
+// A busca percorre a cadeia de fallback (locale ativo -> idioma base ->
+// fallback -> idioma base do fallback). Se a chave nao existir em nenhum
+// deles, a propria chave e devolvida.
 func (c *Catalog) T(key string) string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Tenta locale ativo
-	if msgs, ok := c.translations[c.locale]; ok {
-		if val, ok := msgs[key]; ok {
-			return val
-		}
+	value, ok := c.lookup(key)
+	if !ok {
+		return key
 	}
-
-	// Tenta fallback
-	if c.locale != c.fallback {
-		if msgs, ok := c.translations[c.fallback]; ok {
-			if val, ok := msgs[key]; ok {
-				return val
-			}
-		}
-	}
-
-	// Retorna a chave como ultimo recurso
-	return key
+	return value
 }
 
 // Tf traduz uma chave e formata o resultado usando fmt.Sprintf.
@@ -160,7 +151,8 @@ func (c *Catalog) LoadJSON(path string) error {
 	return nil
 }
 
-// Locales retorna a lista de locales disponiveis no catalogo.
+// Locales retorna a lista de locales disponiveis no catalogo, em ordem
+// alfabetica (a ordem e estavel entre chamadas).
 func (c *Catalog) Locales() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -169,40 +161,60 @@ func (c *Catalog) Locales() []string {
 	for locale := range c.translations {
 		locales = append(locales, locale)
 	}
+	sort.Strings(locales)
 	return locales
 }
 
-// Has verifica se uma chave existe no locale ativo.
+// Has verifica se uma chave existe.
+//
+// Tem o mesmo comportamento de T: a chave e procurada em toda a cadeia de
+// fallback, e nao apenas no locale ativo.
 func (c *Catalog) Has(key string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if msgs, ok := c.translations[c.locale]; ok {
-		_, exists := msgs[key]
-		return exists
-	}
-	return false
+	_, ok := c.lookup(key)
+	return ok
 }
 
-// lookup procura a chave no locale ativo e no locale de fallback.
+// lookup procura a chave na cadeia de fallback do locale ativo.
 // Devolve o valor e true quando a chave existe.
 func (c *Catalog) lookup(key string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if msgs, ok := c.translations[c.locale]; ok {
-		if val, ok := msgs[key]; ok {
-			return val, true
-		}
-	}
-	if c.locale != c.fallback {
-		if msgs, ok := c.translations[c.fallback]; ok {
-			if val, ok := msgs[key]; ok {
-				return val, true
+	for _, locale := range c.chainLocked() {
+		if msgs, ok := c.translations[locale]; ok {
+			if value, ok := msgs[key]; ok {
+				return value, true
 			}
 		}
 	}
 	return "", false
+}
+
+// chainLocked devolve a cadeia de busca dos locales: locale ativo, idioma
+// base do locale ativo, locale de fallback e idioma base do fallback.
+//
+// Exemplo: locale "pt-BR" com fallback "en" -> ["pt-BR", "pt", "en"].
+func (c *Catalog) chainLocked() []string {
+	chain := make([]string, 0, 4)
+
+	appendLocale := func(locale string) {
+		if locale == "" {
+			return
+		}
+		for _, existing := range chain {
+			if existing == locale {
+				return
+			}
+		}
+		chain = append(chain, locale)
+	}
+
+	appendLocale(c.locale)
+	appendLocale(baseLanguage(c.locale))
+	appendLocale(c.fallback)
+	appendLocale(baseLanguage(c.fallback))
+
+	return chain
 }
 
 // localeKey normaliza um locale para uso como chave de armazenamento.
