@@ -25,12 +25,16 @@ type Catalog struct {
 func NewCatalog() *Catalog {
 	return &Catalog{
 		translations: make(map[string]map[string]string),
-		locale:       "en",
-		fallback:     "en",
+		locale:       defaultLocale,
+		fallback:     defaultLocale,
 	}
 }
 
 // AddLocale adiciona ou substitui as mensagens de um locale no catalogo.
+//
+// O locale e normalizado para a forma canonica (ex: "PT_br" -> "pt-BR"),
+// de modo que a chave procurada depois por SetLocale/T sempre encontra as
+// mensagens.
 func (c *Catalog) AddLocale(locale string, messages map[string]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -39,21 +43,23 @@ func (c *Catalog) AddLocale(locale string, messages map[string]string) {
 	for k, v := range messages {
 		copied[k] = v
 	}
-	c.translations[locale] = copied
+	c.translations[localeKey(locale)] = copied
 }
 
 // SetLocale define o locale ativo para traducoes.
+//
+// O locale e normalizado (ex: "PT_br.UTF-8" -> "pt-BR").
 func (c *Catalog) SetLocale(locale string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.locale = locale
+	c.locale = localeKey(locale)
 }
 
 // SetFallback define o locale de fallback quando a chave nao existe no locale ativo.
 func (c *Catalog) SetFallback(locale string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.fallback = locale
+	c.fallback = localeKey(locale)
 }
 
 // Locale retorna o locale ativo atual.
@@ -102,7 +108,8 @@ func (c *Catalog) Tf(key string, args ...any) string {
 
 // DetectLocale detecta o locale do sistema a partir das variaveis de ambiente.
 // Verifica LC_ALL, LC_MESSAGES e LANG nessa ordem de prioridade.
-// Retorna "en" se nenhuma variavel estiver definida.
+// Retorna "en" se nenhuma variavel estiver definida ou se elas apontarem
+// para um pseudo-locale do POSIX ("C", "C.UTF-8", "POSIX.UTF-8").
 func DetectLocale() string {
 	// Ordem de prioridade: LC_ALL > LC_MESSAGES > LANG
 	for _, env := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
@@ -110,34 +117,7 @@ func DetectLocale() string {
 			return parseLocale(val)
 		}
 	}
-	return "en"
-}
-
-// parseLocale extrai o codigo do locale de um valor de variavel de ambiente.
-// Exemplos: "pt_BR.UTF-8" -> "pt-BR", "en_US" -> "en-US", "C" -> "en"
-func parseLocale(raw string) string {
-	if raw == "C" || raw == "POSIX" {
-		return "en"
-	}
-
-	// Remove encoding (ex: .UTF-8)
-	if idx := strings.IndexByte(raw, '.'); idx >= 0 {
-		raw = raw[:idx]
-	}
-
-	// Remove modifier (ex: @euro)
-	if idx := strings.IndexByte(raw, '@'); idx >= 0 {
-		raw = raw[:idx]
-	}
-
-	// Converte underscore para hifen (pt_BR -> pt-BR)
-	raw = strings.ReplaceAll(raw, "_", "-")
-
-	if raw == "" {
-		return "en"
-	}
-
-	return raw
+	return defaultLocale
 }
 
 // LoadJSON carrega traducoes de um arquivo JSON.
@@ -187,4 +167,14 @@ func (c *Catalog) Has(key string) bool {
 		return exists
 	}
 	return false
+}
+
+// localeKey normaliza um locale para uso como chave de armazenamento.
+// Quando a normalizacao nao produz nada (locale vazio), o valor original e
+// preservado.
+func localeKey(locale string) string {
+	if key := normalizeLocale(locale); key != "" {
+		return key
+	}
+	return strings.TrimSpace(locale)
 }

@@ -1,0 +1,131 @@
+package i18n
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestIsRTL(t *testing.T) {
+	testes := []struct {
+		locale   string
+		esperado bool
+	}{
+		{"ar", true},
+		{"ar-EG", true},
+		{"he", true},
+		{"he-IL", true},
+		{"fa", true},
+		{"fa-IR", true},
+		{"ur", true},
+		{"ps", true},
+		{"dv", true},
+		{"syr", true},
+		{"nqo", true},
+		{"yi", true},
+		{"az-Arab", true},
+		{"az-Latn", false},
+		{"pt-BR", false},
+		{"en", false},
+		{"zh-Hant-TW", false},
+		{"", false},
+	}
+
+	for _, tt := range testes {
+		t.Run(tt.locale, func(t *testing.T) {
+			if got := IsRTL(tt.locale); got != tt.esperado {
+				t.Errorf("IsRTL(%q): esperava %v, obteve %v", tt.locale, tt.esperado, got)
+			}
+		})
+	}
+}
+
+func TestReverseTextoLTR(t *testing.T) {
+	// Em texto LTR a ordem visual e igual a ordem logica.
+	if got := Reverse("Hello"); got != "Hello" {
+		t.Errorf("esperava 'Hello', obteve '%q'", got)
+	}
+}
+
+func TestReverseTextoRTL(t *testing.T) {
+	// "שלום" (shalom) na ordem logica -> "םולש" na ordem visual.
+	esperado := "םולש"
+	if got := Reverse("שלום"); got != esperado {
+		t.Errorf("esperava %q, obteve %q", esperado, got)
+	}
+}
+
+func TestReverseTextoBilingue(t *testing.T) {
+	casos := []struct {
+		entrada  string
+		esperado string
+	}{
+		{"Hello שלום", "Hello םולש"},
+		{"שלום Hello", "Hello םולש"},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.entrada, func(t *testing.T) {
+			if got := Reverse(tc.entrada); got != tc.esperado {
+				t.Errorf("Reverse(%q): esperava %q, obteve %q", tc.entrada, tc.esperado, got)
+			}
+		})
+	}
+}
+
+func TestReversePreservaNumeros(t *testing.T) {
+	// Numeros decimais permanecem na ordem logica (regra L4).
+	// Em um paragrafo RTL o numero fica a esquerda da palavra hebraica.
+	esperado := "12 םולש"
+	if got := Reverse("שלום 12"); got != esperado {
+		t.Errorf("esperava %q, obteve %q", esperado, got)
+	}
+}
+
+func TestReversePreservaClusterDeGrapheme(t *testing.T) {
+	// O "e" com acento e um cluster de grapheme: nao pode ser separado.
+	original := "café"
+	reversed := Reverse(original)
+
+	if len([]rune(reversed)) != len([]rune(original)) {
+		t.Fatalf("tamanho mudou: %q -> %q", original, reversed)
+	}
+	if !strings.Contains(reversed, "é") {
+		t.Errorf("esperava preservar o caractere acentuado, obteve %q", reversed)
+	}
+}
+
+func TestReversePreservaEmojiComZWJ(t *testing.T) {
+	// Sequencia de emoji com ZWJ deve continuar intacta.
+	original := "👨‍👩‍👧"
+	reversed := Reverse(original)
+	if reversed != original {
+		t.Errorf("esperava %q, obteve %q", original, reversed)
+	}
+}
+
+func TestReverseVazio(t *testing.T) {
+	if got := Reverse(""); got != "" {
+		t.Errorf("esperava string vazia, obteve %q", got)
+	}
+}
+
+func TestGraphemes(t *testing.T) {
+	testes := []struct {
+		entrada  string
+		esperado int
+	}{
+		{"abc", 3},
+		{"café", 4},
+		{"שלום", 4},
+		{"👨‍👩‍👧", 1},
+		{"", 0},
+	}
+
+	for _, tt := range testes {
+		t.Run(tt.entrada, func(t *testing.T) {
+			if got := len(graphemes(tt.entrada)); got != tt.esperado {
+				t.Errorf("graphemes(%q): esperava %d clusters, obteve %d", tt.entrada, tt.esperado, got)
+			}
+		})
+	}
+}

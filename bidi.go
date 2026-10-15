@@ -1,0 +1,425 @@
+package i18n
+
+import "unicode"
+
+// classeBidi e a classe bidirecional de um caractere (UAX #44).
+type classeBidi uint8
+
+const (
+	clL   classeBidi = iota // forte da esquerda para a direita
+	clR                     // forte da direita para a esquerda
+	clAL                    // letra arabica (forte da direita para a esquerda)
+	clEN                    // numero europeu
+	clAN                    // numero arabico
+	clON                    // neutro (outros)
+	clNSM                   // marca nao separadora
+	clES                    // separador europeu
+	clCS                    // separador comum
+	clET                    // terminador europeu
+	clWS                    // whitespace
+	clBN                    // neutro de fronteira (formatacao)
+	clB                     // separador de paragrafo
+	clS                     // separador de segmento
+)
+
+// reverseVisual reordena os clusters de grapheme na ordem visual (da
+// esquerda para a direita), aplicando as regras bidirecionais do Unicode
+// (UAX #9): resolucao dos tipos (W1-W7, N1-N2), resolucao dos niveis
+// implicitos (I1-I2) e reordenacao (L1-L2).
+//
+// O resultado e a ordem visual: em terminais que nao fazem reordenacao
+// bidirecional, e ela que exibe o texto na direcao correta.
+func reverseVisual(s string) string {
+	clusters := graphemes(s)
+	if len(clusters) <= 1 {
+		return s
+	}
+
+	classes := make([]classeBidi, len(clusters))
+	for i, cluster := range clusters {
+		runes := []rune(cluster)
+		classes[i] = runeBidiClass(runes[0])
+	}
+
+	levels := resolveLevels(classes)
+
+	// L2: reordena do nivel mais alto para o menor nivel impar.
+	maxLevel := 0
+	minOdd := -1
+	for _, level := range levels {
+		if level > maxLevel {
+			maxLevel = level
+		}
+		if level%2 == 1 && (minOdd < 0 || level < minOdd) {
+			minOdd = level
+		}
+	}
+	if minOdd < 0 {
+		// Nenhum nivel impar: o texto e inteiramente LTR e a ordem visual e
+		// igual a ordem logica.
+		return s
+	}
+
+	for level := maxLevel; level >= minOdd; level-- {
+		for i := 0; i < len(clusters); {
+			if levels[i] < level {
+				i++
+				continue
+			}
+			j := i
+			for j < len(clusters) && levels[j] >= level {
+				j++
+			}
+			reverseClusters(clusters[i:j])
+			for k := i; k < j; k++ {
+				levels[k] = levels[i+j-1-k]
+			}
+			i = j
+		}
+	}
+
+	return joinClusters(clusters)
+}
+
+// reverseClusters inverte a ordem dos clusters de grapheme.
+func reverseClusters(clusters []string) {
+	for i, j := 0, len(clusters)-1; i < j; i, j = i+1, j-1 {
+		clusters[i], clusters[j] = clusters[j], clusters[i]
+	}
+}
+
+// joinClusters concatena os clusters de grapheme.
+func joinClusters(clusters []string) string {
+	total := 0
+	for _, cluster := range clusters {
+		total += len(cluster)
+	}
+
+	var b []byte
+	b = make([]byte, 0, total)
+	for _, cluster := range clusters {
+		b = append(b, cluster...)
+	}
+	return string(b)
+}
+
+// resolveLevels calcula o nivel bidirecional de cada cluster, aplicando as
+// regras W1-W7, N1-N2, I1-I2 e L1 do UAX #9.
+func resolveLevels(classes []classeBidi) []int {
+	n := len(classes)
+	types := make([]classeBidi, n)
+	copy(types, classes)
+
+	// Direcao do paragrafo: o primeiro caractere forte define o nivel
+	// embutido (0 para LTR, 1 para RTL).
+	paraLevel := 0
+	for _, c := range types {
+		if c == clR || c == clAL {
+			paraLevel = 1
+			break
+		}
+		if c == clL {
+			break
+		}
+	}
+
+	embedding := clL
+	if paraLevel == 1 {
+		embedding = clR
+	}
+
+	// W1: marcas nao separadoras assumem o tipo do caractere anterior.
+	prev := embedding
+	for i := range types {
+		if types[i] == clNSM {
+			types[i] = prev
+			continue
+		}
+		prev = types[i]
+	}
+
+	// W2: EN vira AN quando o ultimo forte e AL.
+	lastStrong := embedding
+	for i := range types {
+		switch types[i] {
+		case clL, clR, clAL:
+			lastStrong = types[i]
+		case clEN:
+			if lastStrong == clAL {
+				types[i] = clAN
+			}
+		}
+	}
+
+	// W3: AL vira R.
+	for i := range types {
+		if types[i] == clAL {
+			types[i] = clR
+		}
+	}
+
+	// W4: um separador entre dois numeros do mesmo tipo vira o mesmo tipo.
+	for i := 1; i+1 < n; i++ {
+		switch types[i] {
+		case clES:
+			if types[i-1] == clEN && types[i+1] == clEN {
+				types[i] = clEN
+			}
+		case clCS:
+			if types[i-1] == clEN && types[i+1] == clEN {
+				types[i] = clEN
+			} else if types[i-1] == clAN && types[i+1] == clAN {
+				types[i] = clAN
+			}
+		}
+	}
+
+	// W5: uma sequencia de ET adjacente a um EN vira EN.
+	for i := 0; i < n; i++ {
+		if types[i] != clET {
+			continue
+		}
+		j := i
+		for j < n && types[j] == clET {
+			j++
+		}
+		beforeEN := i > 0 && types[i-1] == clEN
+		afterEN := j < n && types[j] == clEN
+		if beforeEN || afterEN {
+			for k := i; k < j; k++ {
+				types[k] = clEN
+			}
+		}
+		i = j - 1
+	}
+
+	// W6: separadores e terminadores que sobraram viram neutros.
+	for i := range types {
+		switch types[i] {
+		case clES, clET, clCS:
+			types[i] = clON
+		}
+	}
+
+	// W7: EN vira L quando o ultimo forte e L.
+	lastStrong = embedding
+	for i := range types {
+		switch types[i] {
+		case clL, clR:
+			lastStrong = types[i]
+		case clEN:
+			if lastStrong == clL {
+				types[i] = clL
+			}
+		}
+	}
+
+	// N1/N2: resolucao dos neutros.
+	for i := 0; i < n; i++ {
+		if strongDirection(types[i]) != clON {
+			continue
+		}
+		j := i
+		for j < n && strongDirection(types[j]) == clON {
+			j++
+		}
+
+		before := embedding
+		if i > 0 {
+			before = strongDirection(types[i-1])
+		}
+		after := embedding
+		if j < n {
+			after = strongDirection(types[j])
+		}
+
+		resolved := embedding
+		if before == after {
+			resolved = before
+		}
+		for k := i; k < j; k++ {
+			types[k] = resolved
+		}
+		i = j - 1
+	}
+
+	// I1/I2: resolucao dos niveis implicitos.
+	levels := make([]int, n)
+	for i, t := range types {
+		if paraLevel%2 == 0 {
+			switch t {
+			case clR:
+				levels[i] = paraLevel + 1
+			case clAN, clEN:
+				levels[i] = paraLevel + 2
+			default:
+				levels[i] = paraLevel
+			}
+			continue
+		}
+		switch t {
+		case clL, clEN, clAN:
+			levels[i] = paraLevel + 1
+		default:
+			levels[i] = paraLevel
+		}
+	}
+
+	// L1: separadores de paragrafo/segmento e o whitespace no fim da linha
+	// voltam ao nivel do paragrafo.
+	for i := range levels {
+		switch classes[i] {
+		case clB, clS:
+			levels[i] = paraLevel
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		if classes[i] != clWS && classes[i] != clBN {
+			break
+		}
+		levels[i] = paraLevel
+	}
+
+	return levels
+}
+
+// strongDirection devolve a direcao forte de um tipo. Numeros contam como
+// RTL para efeito de resolucao de neutros (regra N1).
+func strongDirection(c classeBidi) classeBidi {
+	switch c {
+	case clL:
+		return clL
+	case clR, clEN, clAN:
+		return clR
+	}
+	return clON
+}
+
+// runeBidiClass devolve a classe bidirecional de um caractere (UAX #44).
+//
+// A implementacao cobre os scripts usados em interfaces de terminal: latin,
+// grego, cirilico, arabe, hebraico e demais scripts da direita para a
+// esquerda, alem dos numeros e da pontuacao mais comuns.
+func runeBidiClass(r rune) classeBidi {
+	switch {
+	case r < 0x80:
+		return asciiBidiClass(r)
+	case r == 0x00A0:
+		return clWS
+	case r == 0x00AD:
+		return clBN
+	case r >= 0x0590 && r <= 0x05FF:
+		// Hebraico (os pontos diacriticos sao marcas nao separadoras).
+		if isHebrewMark(r) {
+			return clNSM
+		}
+		return clR
+	case r >= 0x0600 && r <= 0x06FF:
+		return arabicBidiClass(r)
+	case r >= 0x0700 && r <= 0x074F, r >= 0x0860 && r <= 0x086F:
+		return clR // siriaco
+	case r >= 0x0750 && r <= 0x077F:
+		return clAL // arabe suplementar
+	case r >= 0x0780 && r <= 0x07BF:
+		return clAL // thaana
+	case r >= 0x07C0 && r <= 0x07FF:
+		return clR // n'ko
+	case r >= 0x0800 && r <= 0x083F:
+		return clR // samaritano
+	case r >= 0x0840 && r <= 0x085F:
+		return clAL // mandaico
+	case r >= 0x0870 && r <= 0x08FF:
+		return clAL // arabe ampliado
+	case r >= 0xFB1D && r <= 0xFB4F:
+		return clR // hebraico (formas de apresentacao)
+	case r >= 0xFB50 && r <= 0xFDFF, r >= 0xFE70 && r <= 0xFEFF:
+		return clAL // arabe (formas de apresentacao)
+	case r >= 0x0660 && r <= 0x0669, r >= 0x06F0 && r <= 0x06F9:
+		return clAN
+	case r >= 0x2000 && r <= 0x200A, r == 0x1680, r == 0x202F, r == 0x205F, r == 0x3000:
+		return clWS
+	case r == 0x2028:
+		return clWS
+	case r == 0x2029:
+		return clB
+	case r == 0x0009, r == 0x001F:
+		return clS
+	case r == 0x200B, r == 0x200C, r == 0x200D, r == 0x200E, r == 0x200F,
+		r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069, r == 0xFEFF:
+		return clBN
+	}
+
+	switch {
+	case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r):
+		return clNSM
+	case unicode.IsDigit(r):
+		return clEN
+	case unicode.IsLetter(r) || unicode.Is(unicode.Mc, r):
+		return clL
+	}
+	return clON
+}
+
+// asciiBidiClass devolve a classe bidirecional de um caractere ASCII.
+func asciiBidiClass(r rune) classeBidi {
+	switch {
+	case r >= '0' && r <= '9':
+		return clEN
+	case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+		return clL
+	case r == ' ':
+		return clWS
+	case r == '\t':
+		return clS
+	case r == '\n' || r == '\r':
+		return clB
+	case r == '+' || r == '-':
+		return clES
+	case r == ',' || r == '.' || r == '/' || r == ':':
+		return clCS
+	case r == '#' || r == '$' || r == '%' || r == '&':
+		return clET
+	case r < 0x20 || r == 0x7F:
+		return clBN
+	}
+	return clON
+}
+
+// isHebrewMark informa se o caractere hebraico e uma marca diacritica.
+func isHebrewMark(r rune) bool {
+	switch {
+	case r >= 0x0591 && r <= 0x05BD:
+		return true
+	case r == 0x05BF, r == 0x05C1, r == 0x05C2:
+		return true
+	case r >= 0x05C4 && r <= 0x05C5:
+		return true
+	case r == 0x05C7:
+		return true
+	}
+	return false
+}
+
+// arabicBidiClass devolve a classe bidirecional de um caractere do bloco
+// arabe.
+func arabicBidiClass(r rune) classeBidi {
+	switch {
+	case r >= 0x0660 && r <= 0x0669:
+		return clAN
+	case r == 0x066A:
+		return clET
+	case r == 0x066B || r == 0x066C || r == 0x06DD:
+		return clAN
+	case r == 0x060C:
+		return clCS
+	case r == 0x06DE || r == 0x06E9:
+		return clON
+	case r >= 0x0600 && r <= 0x0605:
+		return clNSM
+	case r >= 0x064B && r <= 0x065F, r == 0x0670,
+		r >= 0x06D6 && r <= 0x06DC, r >= 0x06DF && r <= 0x06E4,
+		r >= 0x06E7 && r <= 0x06E8, r >= 0x06EA && r <= 0x06ED:
+		return clNSM
+	}
+	return clAL
+}
